@@ -8,6 +8,7 @@ import {
 import { GlobalStyles } from "./components/GlobalStyle";
 import Layout from "./components/Layout";
 import { Loading } from "./components/Loading";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { isAuthenticated, usePrepareApp } from "./helper/auth";
 import { Home } from "./pages/Home";
 import { Login } from "./pages/Login";
@@ -23,13 +24,15 @@ function App() {
   return (
     <BrowserRouter>
       <GlobalStyles />
-      <Layout>
-        <Switch>
-          <Route path="/login" component={Login} />
-          <Route path="/signup" component={Signup} />
-          <AuthRoute path="/" component={Home} />
-        </Switch>
-      </Layout>
+      <ErrorBoundary>
+        <Layout>
+          <Switch>
+            <Route path="/login" component={Login} />
+            <Route path="/signup" component={Signup} />
+            <AuthRoute path="/" component={Home} />
+          </Switch>
+        </Layout>
+      </ErrorBoundary>
     </BrowserRouter>
   );
 }

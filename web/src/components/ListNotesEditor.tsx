@@ -10,13 +10,13 @@ import { GENERICS, MIXINS } from "./GlobalStyle";
 import dayjs from "dayjs";
 import relativeTime from "dayjs/plugin/relativeTime";
 import { FaSortDown, FaSortUp, FaTrash } from "react-icons/fa";
-import { ChangeEvent, Fragment, useEffect } from "react";
-import { useState } from "react";
+import { ChangeEvent, Fragment, useEffect, useRef, useState } from "react";
 import ReactQuill from "react-quill";
 import "react-quill/dist/quill.snow.css";
 import { stripHtml } from "string-strip-html";
-import { debounceFn } from "../helper/debounce";
 import { stripText } from "../helper/stripText";
+import { ApolloCache } from "@apollo/client";
+
 dayjs.extend(relativeTime);
 
 interface EditorProps {
@@ -24,29 +24,62 @@ interface EditorProps {
 }
 
 type OrderByType = "ASC" | "DESC";
+type SaveStatus = "idle" | "saving" | "saved";
 
 export function ListNotesEditor() {
-  const { data, refetch } = useListNotesQuery();
+  const { data, refetch, error } = useListNotesQuery();
   const [noteForm, setNoteForm] = useState({
     title: "",
     content: "",
   });
-  const [isSaving, setIsSaving] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
   const [orderBy, setOrderBy] = useState<OrderByType>("DESC");
   const [selectedNote, setSelectedNote] = useState<Note | null>(null);
   const [submitUpdateNote] = useUpdateNoteMutation();
   const [submitDeleteNote] = useDeleteNoteMutation();
 
+  const autoSaveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const saveStatusTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const clearAutoSaveTimeout = () => {
+    if (autoSaveTimeoutRef.current) {
+      clearTimeout(autoSaveTimeoutRef.current);
+    }
+    autoSaveTimeoutRef.current = null;
+  };
+
+  const clearSaveStatusTimeout = () => {
+    if (saveStatusTimeoutRef.current) {
+      clearTimeout(saveStatusTimeoutRef.current);
+    }
+    saveStatusTimeoutRef.current = null;
+  };
+
   const onChangeTitleHandler = (evt: ChangeEvent<HTMLInputElement>) => {
     setNoteForm({ ...noteForm, title: evt.target.value });
+    scheduleAutoSave();
   };
 
   const onChangeEditorHandler = (value: string) => {
     setNoteForm((prevNote) => ({ ...prevNote, content: value }));
+    scheduleAutoSave();
   };
 
-  const onUpdateNoteHandler = debounceFn(async () => {
+  const scheduleAutoSave = () => {
     if (!selectedNote) return;
+    
+    clearAutoSaveTimeout();
+    autoSaveTimeoutRef.current = setTimeout(() => {
+      handleSaveNote();
+    }, 3000);
+  };
+
+  const handleSaveNote = async () => {
+    if (!selectedNote) return;
+
+    clearAutoSaveTimeout();
+    setSaveStatus("saving");
+
     try {
       await submitUpdateNote({
         variables: {
@@ -54,23 +87,64 @@ export function ListNotesEditor() {
           content: noteForm.content,
           noteId: selectedNote.id,
         },
-        update: (store, newNote) => {
-          store.writeQuery({
-            query: ListNotesDocument,
-            data: {
-              listNotes: data?.listNotes.map((note) => {
-                if (note.id === selectedNote.id) {
-                  return newNote;
-                }
-                return note;
-              }),
+        optimisticResponse: {
+          __typename: "Mutation",
+          updateNote: {
+            __typename: "Note",
+            id: selectedNote.id,
+            title: noteForm.title,
+            content: noteForm.content,
+            created_at: selectedNote.created_at,
+            updated_at: new Date().toISOString(),
+            created_by: {
+              __typename: "User",
+              id: selectedNote.created_by.id,
+              email: selectedNote.created_by.email,
+              username: selectedNote.created_by.username,
+            },
+          },
+        },
+        update: (cache, { data: mutationData }) => {
+          if (!mutationData?.updateNote) return;
+
+          const updatedNote = mutationData.updateNote;
+
+          cache.modify({
+            id: cache.identify(updatedNote),
+            fields: {
+              title: () => updatedNote.title,
+              content: () => updatedNote.content,
+              updated_at: () => updatedNote.updated_at,
             },
           });
+
+          const currentList = cache.readQuery({ query: ListNotesDocument });
+          if (currentList && currentList.listNotes) {
+            cache.writeQuery({
+              query: ListNotesDocument,
+              data: {
+                listNotes: currentList.listNotes.map((note: Note) => {
+                  if (note.id === updatedNote.id) {
+                    return updatedNote;
+                  }
+                  return note;
+                }),
+              },
+            });
+          }
         },
       });
-      setIsSaving(false);
-    } catch (error) {}
-  });
+
+      setSaveStatus("saved");
+      clearSaveStatusTimeout();
+      saveStatusTimeoutRef.current = setTimeout(() => {
+        setSaveStatus("idle");
+      }, 2000);
+    } catch (error) {
+      setSaveStatus("idle");
+      console.error(error);
+    }
+  };
 
   const onDeleteNoteHandler = (note: Note) => async () => {
     if (window.confirm("Are you sure?")) {
@@ -79,15 +153,29 @@ export function ListNotesEditor() {
           variables: {
             noteId: note.id,
           },
-          update: (store) => {
-            store.writeQuery({
-              query: ListNotesDocument,
-              data: {
-                listNotes: data?.listNotes.filter(({ id }) => id !== note.id),
-              },
-            });
+          update: (cache) => {
+            const noteId = cache.identify({ __typename: "Note", id: note.id });
+            if (noteId) {
+              cache.evict({ id: noteId });
+              cache.gc();
+            }
+
+            const currentList = cache.readQuery({ query: ListNotesDocument });
+            if (currentList && currentList.listNotes) {
+              cache.writeQuery({
+                query: ListNotesDocument,
+                data: {
+                  listNotes: currentList.listNotes.filter((n: Note) => n.id !== note.id),
+                },
+              });
+            }
           },
         });
+
+        if (selectedNote?.id === note.id) {
+          setSelectedNote(null);
+          setNoteForm({ title: "", content: "" });
+        }
       } catch (error) {
         console.error(error);
       }
@@ -95,21 +183,20 @@ export function ListNotesEditor() {
   };
 
   useEffect(() => {
-    if (selectedNote) {
-      setTimeout(() => {
-        setIsSaving(true);
-      }, 1500);
-    }
-
-    onUpdateNoteHandler();
-  }, [selectedNote, noteForm, onUpdateNoteHandler]);
+    return () => {
+      clearAutoSaveTimeout();
+      clearSaveStatusTimeout();
+    };
+  }, []);
 
   const onSelectNoteHandler = (note: Note) => () => {
+    clearAutoSaveTimeout();
     setNoteForm({
       title: note.title,
       content: note.content,
     });
     setSelectedNote(note);
+    setSaveStatus("idle");
   };
 
   const onClickOrderHandler = async () => {
@@ -117,16 +204,24 @@ export function ListNotesEditor() {
     await refetch({
       orderBy: newOrderBy,
     });
-    console.log("REFETCHING");
     setOrderBy(newOrderBy);
   };
+
+  if (error) {
+    return (
+      <ErrorBoundaryFallback 
+        message="加载笔记列表失败" 
+        onRetry={() => refetch()} 
+      />
+    );
+  }
 
   return (
     <Fragment>
       <ListNotesStyle>
         <h2>All Notes</h2>
         <div className="note-filter">
-          <span>{data?.listNotes.length} Notes</span>
+          <span>{data?.listNotes.length || 0} Notes</span>
           <div className="filters">
             <span onClick={onClickOrderHandler}>
               {orderBy === "DESC" ? <FaSortDown /> : <FaSortUp />}
@@ -149,7 +244,10 @@ export function ListNotesEditor() {
               </div>
               <div
                 className="delete-btn"
-                onClick={onDeleteNoteHandler(note as any)}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDeleteNoteHandler(note as any)();
+                }}
               >
                 <FaTrash />
               </div>
@@ -164,11 +262,14 @@ export function ListNotesEditor() {
           placeholder="Title"
           onChange={onChangeTitleHandler}
         />
-        {isSaving && (
-          <div className="saving-text">
-            <small>saving...</small>
-          </div>
-        )}
+        <div className="save-status">
+          {saveStatus === "saving" && (
+            <span className="saving">保存中...</span>
+          )}
+          {saveStatus === "saved" && (
+            <span className="saved">已保存</span>
+          )}
+        </div>
         <ReactQuill
           value={noteForm.content}
           readOnly={!selectedNote}
@@ -177,6 +278,32 @@ export function ListNotesEditor() {
         />
       </EditorContainer>
     </Fragment>
+  );
+}
+
+interface ErrorBoundaryFallbackProps {
+  message?: string;
+  onRetry?: () => void;
+}
+
+function ErrorBoundaryFallback({ message = "发生错误", onRetry }: ErrorBoundaryFallbackProps) {
+  return (
+    <ErrorStyled>
+      <div className="error-container">
+        <h2>出错了</h2>
+        <p>{message}</p>
+        <div className="error-actions">
+          {onRetry && (
+            <button className="retry-btn" onClick={onRetry}>
+              重试
+            </button>
+          )}
+          <button className="back-btn" onClick={() => window.location.reload()}>
+            返回列表
+          </button>
+        </div>
+      </div>
+    </ErrorStyled>
   );
 }
 
@@ -265,9 +392,17 @@ const EditorContainer = styled.div<EditorProps>`
     }
   }
 
-  .saving-text {
-    padding: 0 18px;
+  .save-status {
+    padding: 0 18px 10px;
     font-style: italic;
+
+    .saving {
+      color: #666;
+    }
+
+    .saved {
+      color: #4caf50;
+    }
   }
 
   .ql-toolbar,
@@ -284,5 +419,67 @@ const EditorContainer = styled.div<EditorProps>`
   .ql-toolbar,
   .ql-editor p {
     cursor: ${(props: any) => (props.disabled ? "not-allowed;" : "unset")};
+  }
+`;
+
+const ErrorStyled = styled.div`
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: ${GENERICS.bgColor};
+
+  .error-container {
+    text-align: center;
+    padding: 40px;
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+    max-width: 400px;
+
+    h2 {
+      color: ${GENERICS.colorBlackCalm};
+      margin-bottom: 16px;
+    }
+
+    p {
+      color: ${GENERICS.colorGray};
+      margin-bottom: 24px;
+    }
+
+    .error-actions {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+
+      button {
+        padding: 10px 20px;
+        border-radius: 4px;
+        font-size: 14px;
+        cursor: pointer;
+        transition: all 0.2s;
+
+        &.retry-btn {
+          background: ${GENERICS.colorBlackCalm};
+          color: white;
+          border: none;
+
+          &:hover {
+            background: #333;
+          }
+        }
+
+        &.back-btn {
+          background: white;
+          color: ${GENERICS.colorBlackCalm};
+          border: 1px solid #ccc;
+
+          &:hover {
+            background: #f5f5f5;
+          }
+        }
+      }
+    }
   }
 `;
