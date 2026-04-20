@@ -1,6 +1,7 @@
 import styled from "@emotion/styled";
 import {
   ListNotesDocument,
+  ListNotesQuery,
   Note,
   useDeleteNoteMutation,
   useListNotesQuery,
@@ -15,7 +16,6 @@ import ReactQuill from "react-quill";
 import "react-quill/dist/quill.snow.css";
 import { stripHtml } from "string-strip-html";
 import { stripText } from "../helper/stripText";
-import { ApolloCache } from "@apollo/client";
 
 dayjs.extend(relativeTime);
 
@@ -67,7 +67,7 @@ export function ListNotesEditor() {
 
   const scheduleAutoSave = () => {
     if (!selectedNote) return;
-    
+
     clearAutoSaveTimeout();
     autoSaveTimeoutRef.current = setTimeout(() => {
       handleSaveNote();
@@ -118,12 +118,14 @@ export function ListNotesEditor() {
             },
           });
 
-          const currentList = cache.readQuery({ query: ListNotesDocument });
+          const currentList = cache.readQuery<ListNotesQuery>({
+            query: ListNotesDocument,
+          });
           if (currentList && currentList.listNotes) {
             cache.writeQuery({
               query: ListNotesDocument,
               data: {
-                listNotes: currentList.listNotes.map((note: Note) => {
+                listNotes: currentList.listNotes.map((note) => {
                   if (note.id === updatedNote.id) {
                     return updatedNote;
                   }
@@ -160,12 +162,16 @@ export function ListNotesEditor() {
               cache.gc();
             }
 
-            const currentList = cache.readQuery({ query: ListNotesDocument });
+            const currentList = cache.readQuery<ListNotesQuery>({
+              query: ListNotesDocument,
+            });
             if (currentList && currentList.listNotes) {
               cache.writeQuery({
                 query: ListNotesDocument,
                 data: {
-                  listNotes: currentList.listNotes.filter((n: Note) => n.id !== note.id),
+                  listNotes: currentList.listNotes.filter(
+                    (n) => n.id !== note.id,
+                  ),
                 },
               });
             }
@@ -209,9 +215,9 @@ export function ListNotesEditor() {
 
   if (error) {
     return (
-      <ErrorBoundaryFallback 
-        message="加载笔记列表失败" 
-        onRetry={() => refetch()} 
+      <ErrorBoundaryFallback
+        message="加载笔记列表失败"
+        onRetry={() => refetch()}
       />
     );
   }
@@ -263,12 +269,8 @@ export function ListNotesEditor() {
           onChange={onChangeTitleHandler}
         />
         <div className="save-status">
-          {saveStatus === "saving" && (
-            <span className="saving">保存中...</span>
-          )}
-          {saveStatus === "saved" && (
-            <span className="saved">已保存</span>
-          )}
+          {saveStatus === "saving" && <span className="saving">保存中...</span>}
+          {saveStatus === "saved" && <span className="saved">已保存</span>}
         </div>
         <ReactQuill
           value={noteForm.content}
@@ -286,7 +288,10 @@ interface ErrorBoundaryFallbackProps {
   onRetry?: () => void;
 }
 
-function ErrorBoundaryFallback({ message = "发生错误", onRetry }: ErrorBoundaryFallbackProps) {
+function ErrorBoundaryFallback({
+  message = "发生错误",
+  onRetry,
+}: ErrorBoundaryFallbackProps) {
   return (
     <ErrorStyled>
       <div className="error-container">
