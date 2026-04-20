@@ -1,12 +1,13 @@
-version: '3'
+version: "3"
 services:
   mysql:
-    image: "mysql:5.7.10"
+    image: "mysql:8.0"
     ports:
       - "127.0.0.1:3306:3306"
-    expose: 
+    expose:
       - 3306
-    env_file: /server/.env
+    env_file: ./server/.env
+    command: --default-authentication-plugin=mysql_native_password
     environment:
       MYSQL_ROOT_PASSWORD: $$MYSQL_ROOT_PASSWORD
       MYSQL_USER: $$MYSQL_USER
@@ -18,21 +19,21 @@ services:
     volumes:
       - mysql-data:/var/lib/mysql
   server:
-    image: api-server
+    build: ./server
     ports:
       - "4000:4000"
     volumes:
       - ./server:/usr/app
       - /usr/app/node_modules
-    depends_on: 
+    depends_on:
       - mysql
-    networks: 
+    networks:
       - nevernote-app
     restart: unless-stopped
     environment:
       MYSQL_HOST_IP: mysql
   web:
-    image: react-web
+    build: ./web
     restart: unless-stopped
     ports:
       - "3000:3000"
@@ -47,5 +48,3 @@ volumes:
 networks:
   nevernote-app:
     driver: bridge
-  
-
