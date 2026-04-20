@@ -40,6 +40,12 @@ export function ListNotesEditor() {
 
   const autoSaveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const saveStatusTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const isSavingRef = useRef(false);
+  const pendingSaveRef = useRef<{
+    noteId: string;
+    title: string;
+    content: string;
+  } | null>(null);
 
   const clearAutoSaveTimeout = () => {
     if (autoSaveTimeoutRef.current) {
@@ -74,33 +80,43 @@ export function ListNotesEditor() {
     }, 3000);
   };
 
-  const handleSaveNote = async () => {
-    if (!selectedNote) return;
+  const processPendingSave = async () => {
+    if (!pendingSaveRef.current || !selectedNote) return;
 
-    clearAutoSaveTimeout();
+    const pending = pendingSaveRef.current;
+    pendingSaveRef.current = null;
+
+    await saveNote(pending.noteId, pending.title, pending.content);
+  };
+
+  const saveNote = async (noteId: string, title: string, content: string) => {
+    const currentNote = data?.listNotes.find((n) => n.id === noteId);
+    if (!currentNote) return;
+
+    isSavingRef.current = true;
     setSaveStatus("saving");
 
     try {
       await submitUpdateNote({
         variables: {
-          title: noteForm.title,
-          content: noteForm.content,
-          noteId: selectedNote.id,
+          title,
+          content,
+          noteId,
         },
         optimisticResponse: {
           __typename: "Mutation",
           updateNote: {
             __typename: "Note",
-            id: selectedNote.id,
-            title: noteForm.title,
-            content: noteForm.content,
-            created_at: selectedNote.created_at,
+            id: noteId,
+            title,
+            content,
+            created_at: currentNote.created_at,
             updated_at: new Date().toISOString(),
             created_by: {
               __typename: "User",
-              id: selectedNote.created_by.id,
-              email: selectedNote.created_by.email,
-              username: selectedNote.created_by.username,
+              id: currentNote.created_by.id,
+              email: currentNote.created_by.email,
+              username: currentNote.created_by.username,
             },
           },
         },
@@ -145,7 +161,27 @@ export function ListNotesEditor() {
     } catch (error) {
       setSaveStatus("idle");
       console.error(error);
+    } finally {
+      isSavingRef.current = false;
+      processPendingSave();
     }
+  };
+
+  const handleSaveNote = async () => {
+    if (!selectedNote) return;
+
+    clearAutoSaveTimeout();
+
+    if (isSavingRef.current) {
+      pendingSaveRef.current = {
+        noteId: selectedNote.id,
+        title: noteForm.title,
+        content: noteForm.content,
+      };
+      return;
+    }
+
+    await saveNote(selectedNote.id, noteForm.title, noteForm.content);
   };
 
   const onDeleteNoteHandler = (note: Note) => async () => {
@@ -197,6 +233,17 @@ export function ListNotesEditor() {
 
   const onSelectNoteHandler = (note: Note) => () => {
     clearAutoSaveTimeout();
+    
+    if (selectedNote && selectedNote.id !== note.id) {
+      const hasUnsavedChanges = 
+        noteForm.title !== selectedNote.title || 
+        noteForm.content !== selectedNote.content;
+      
+      if (hasUnsavedChanges && !isSavingRef.current) {
+        saveNote(selectedNote.id, noteForm.title, noteForm.content);
+      }
+    }
+
     setNoteForm({
       title: note.title,
       content: note.content,
